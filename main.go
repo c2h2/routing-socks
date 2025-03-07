@@ -8,7 +8,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"log"
 )
+
+var listenPort = "1081"
 
 // Addr represents a SOCKS5 destination address
 type Addr struct {
@@ -35,8 +38,8 @@ func main() {
 	// Parse command-line flags
 	var localAddr string
 	var upstream string
-	flag.StringVar(&localAddr, "listen", "[::1]:1080", "Local address to listen on (e.g., [::1]:1080 for IPv6)")
-	flag.StringVar(&upstream, "upstream", "", "Upstream SOCKS5 proxy (e.g., 127.0.0.1:1080), leave empty for direct connection")
+	flag.StringVar(&localAddr, "listen", "[::1]:"+listenPort, "Local address to listen on (e.g., [::1]:"+listenPort+" for IPv6)")
+	flag.StringVar(&upstream, "upstream", "", "Upstream SOCKS5 proxy (e.g., 127.0.0.1:"+listenPort+"), leave empty for direct connection")
 	flag.Parse()
 
 	// Set up TCP listener
@@ -59,7 +62,6 @@ func main() {
 		go handleClient(client, upstream)
 	}
 }
-
 // handleClient processes a single client connection
 func handleClient(client net.Conn, upstream string) {
 	defer client.Close()
@@ -79,19 +81,37 @@ func handleClient(client net.Conn, upstream string) {
 	}
 
 	// Print the request details
-	fmt.Printf("Request: %s\n", destAddr.String())
+	log.Printf("Request: %s\n", destAddr.String())
+
+	// Lookup IPs for the given address (assumes destAddr.Addr is a domain name)
+	ipsToCheck, err := net.LookupIP(string(destAddr.Addr))
+	if err != nil {
+		log.Println("LookupIP error:", err)
+	}
+	
+	// Prefer IPv4, if not, use the first available IP (IPv6)
+	var ipToUse string
+	for _, ip := range ipsToCheck {
+		if ip.To4() != nil {
+			ipToUse = ip.String()
+			break
+		}
+	}
+	if ipToUse == "" && len(ipsToCheck) > 0 {
+		ipToUse = ipsToCheck[0].String()
+	}
+
+	port := destAddr.Port
 
 	// Connect to the destination (via upstream or directly)
 	var destConn net.Conn
 	if upstream != "" {
 		destConn, err = dialThroughSocks(upstream, destAddr)
 	} else {
-		// Direct connection
-		host := string(destAddr.Addr)
-		if destAddr.Atyp == 0x01 || destAddr.Atyp == 0x04 {
-			host = net.IP(destAddr.Addr).String()
-		}
-		addrStr := net.JoinHostPort(host, fmt.Sprint(destAddr.Port))
+		// Direct connection: use the resolved IP address and port
+		// Use net.JoinHostPort to correctly format the address
+		addrStr := net.JoinHostPort(ipToUse, fmt.Sprint(port))
+		log.Println("Dialing:", addrStr)
 		destConn, err = net.Dial("tcp", addrStr)
 	}
 	if err != nil {
@@ -112,6 +132,7 @@ func handleClient(client net.Conn, upstream string) {
 	go io.Copy(destConn, client)
 	io.Copy(client, destConn)
 }
+
 
 // handleHandshake performs the SOCKS5 handshake
 func handleHandshake(conn net.Conn) error {
